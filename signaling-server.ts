@@ -6,7 +6,7 @@
  * URL: wss://signal.clevrsend.app
  */
 
-const SERVER_VERSION = "1.3.3";
+const SERVER_VERSION = "1.3.4";
 
 interface ClientInfo {
   alias: string;
@@ -218,6 +218,21 @@ function handleMessage(senderId: string, message: any, sender: Client) {
         console.log(`Forwarded QR_ANSWER from ${senderId} to ${message.targetId}`);
       } else {
         console.warn(`QR_ANSWER target ${message.targetId} not found or not ready`);
+      }
+      break;
+
+    case "ICE_CANDIDATE":
+      // Forward ICE candidate to target peer (for Trickle ICE)
+      const iceTarget = clients.get(message.targetId);
+      if (iceTarget && iceTarget.socket.readyState === WebSocket.OPEN) {
+        iceTarget.socket.send(JSON.stringify({
+          type: "ICE_CANDIDATE",
+          candidate: message.candidate,
+          senderId: senderId,
+        }));
+        console.log(`Forwarded ICE_CANDIDATE from ${senderId} to ${message.targetId}`);
+      } else {
+        console.warn(`ICE_CANDIDATE target ${message.targetId} not found or not ready`);
       }
       break;
 
