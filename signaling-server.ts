@@ -6,7 +6,7 @@
  * URL: wss://signal.clevrsend.app
  */
 
-const SERVER_VERSION = "1.1.2";
+const SERVER_VERSION = "1.1.3";
 
 interface ClientInfo {
   alias: string;
@@ -55,7 +55,12 @@ Deno.serve({ port: 8080 }, (req) => {
       clients: clients.size,
       uptime: performance.now(),
     }), {
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET, OPTIONS",
+        "access-control-allow-headers": "Content-Type"
+      },
     });
   }
 
