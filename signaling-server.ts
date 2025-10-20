@@ -6,6 +6,8 @@
  * URL: wss://signal.clevrsend.app
  */
 
+const SERVER_VERSION = "1.0.49";
+
 interface ClientInfo {
   alias: string;
   version: string;
@@ -49,6 +51,7 @@ Deno.serve({ port: 8080 }, (req) => {
   if (url.pathname === "/health") {
     return new Response(JSON.stringify({
       status: "ok",
+      version: SERVER_VERSION,
       clients: clients.size,
       uptime: performance.now(),
     }), {
@@ -232,6 +235,6 @@ function broadcast(message: any, excludeId?: string) {
   console.log(`Broadcasted ${message.type} to ${sent} clients`);
 }
 
-console.log("ClevrSend Signaling Server started on port 8080");
+console.log(`ClevrSend Signaling Server v${SERVER_VERSION} started on port 8080`);
 console.log("WebSocket endpoint: ws://localhost:8080");
 console.log("Health check: http://localhost:8080/health");
