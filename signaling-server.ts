@@ -6,7 +6,7 @@
  * URL: wss://signal.clevrsend.app
  */
 
-const SERVER_VERSION = "1.1.3";
+const SERVER_VERSION = "1.3.0";
 
 interface ClientInfo {
   alias: string;
