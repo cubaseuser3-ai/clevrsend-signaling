@@ -1,12 +1,14 @@
 /**
- * ClevrSend Signaling Server
+ * ClevrSend Signaling Server - BETA
  * Compatible with LocalSend protocol
  *
- * Deploy to: Deno Deploy, Cloudflare Workers, or any Deno runtime
- * URL: wss://signal.clevrsend.app
+ * BETA ENVIRONMENT - For testing experimental features
+ *
+ * Deploy to: Render.com
+ * URL: wss://clevrsend-signaling-beta.onrender.com
  */
 
-const SERVER_VERSION = "1.3.4";
+const SERVER_VERSION = "1.4.0-beta.1";
 
 interface ClientInfo {
   alias: string;
