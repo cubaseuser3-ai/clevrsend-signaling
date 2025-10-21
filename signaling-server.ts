@@ -6,7 +6,7 @@
  * URL: wss://signal.clevrsend.app
  */
 
-const SERVER_VERSION = "1.4.0";
+const SERVER_VERSION = "1.5.0";
 
 interface ClientInfo {
   alias: string;
@@ -26,11 +26,29 @@ interface Client {
 // Store all connected clients
 const clients = new Map<string, Client>();
 
-// Cleanup interval (remove dead connections)
+// Store QR offers temporarily (short ID -> offer data)
+interface StoredOffer {
+  data: any;
+  timestamp: number;
+}
+const qrOffers = new Map<string, StoredOffer>();
+
+// Generate short ID for QR codes (6 alphanumeric characters)
+function generateShortId(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Removed ambiguous chars (0, O, I, 1)
+  let id = '';
+  for (let i = 0; i < 6; i++) {
+    id += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return id;
+}
+
+// Cleanup interval (remove dead connections and old QR offers)
 setInterval(() => {
   const now = Date.now();
   const timeout = 5 * 60 * 1000; // 5 minutes
 
+  // Clean up inactive clients
   for (const [id, client] of clients.entries()) {
     if (now - client.lastPing > timeout) {
       console.log(`Removing inactive client: ${id}`);
@@ -42,10 +60,30 @@ setInterval(() => {
       });
     }
   }
+
+  // Clean up expired QR offers
+  for (const [id, offer] of qrOffers.entries()) {
+    if (now - offer.timestamp > timeout) {
+      console.log(`Removing expired QR offer: ${id}`);
+      qrOffers.delete(id);
+    }
+  }
 }, 60 * 1000); // Check every minute
 
 Deno.serve({ port: 8080 }, (req) => {
   const url = new URL(req.url);
+
+  // CORS headers for all requests
+  const corsHeaders = {
+    "access-control-allow-origin": "*",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "access-control-allow-headers": "Content-Type",
+  };
+
+  // Handle CORS preflight
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
 
   // Health check endpoint
   if (url.pathname === "/health") {
@@ -53,15 +91,86 @@ Deno.serve({ port: 8080 }, (req) => {
       status: "ok",
       version: SERVER_VERSION,
       clients: clients.size,
+      qrOffers: qrOffers.size,
       uptime: performance.now(),
     }), {
       headers: {
         "content-type": "application/json",
-        "access-control-allow-origin": "*",
-        "access-control-allow-methods": "GET, OPTIONS",
-        "access-control-allow-headers": "Content-Type"
+        ...corsHeaders,
       },
     });
+  }
+
+  // Store QR offer endpoint: POST /qr/store
+  if (url.pathname === "/qr/store" && req.method === "POST") {
+    return req.json().then((data) => {
+      // Generate unique short ID
+      let shortId = generateShortId();
+      while (qrOffers.has(shortId)) {
+        shortId = generateShortId();
+      }
+
+      // Store offer with timestamp
+      qrOffers.set(shortId, {
+        data,
+        timestamp: Date.now(),
+      });
+
+      console.log(`Stored QR offer: ${shortId}`);
+
+      return new Response(JSON.stringify({
+        success: true,
+        id: shortId,
+        expiresIn: 5 * 60 * 1000, // 5 minutes
+      }), {
+        headers: {
+          "content-type": "application/json",
+          ...corsHeaders,
+        },
+      });
+    }).catch((e) => {
+      console.error("Failed to store QR offer:", e);
+      return new Response(JSON.stringify({
+        success: false,
+        error: "Invalid request body",
+      }), {
+        status: 400,
+        headers: {
+          "content-type": "application/json",
+          ...corsHeaders,
+        },
+      });
+    });
+  }
+
+  // Retrieve QR offer endpoint: GET /qr/{id}
+  if (url.pathname.startsWith("/qr/") && req.method === "GET") {
+    const shortId = url.pathname.split("/")[2];
+    const offer = qrOffers.get(shortId);
+
+    if (offer) {
+      console.log(`Retrieved QR offer: ${shortId}`);
+      return new Response(JSON.stringify({
+        success: true,
+        data: offer.data,
+      }), {
+        headers: {
+          "content-type": "application/json",
+          ...corsHeaders,
+        },
+      });
+    } else {
+      return new Response(JSON.stringify({
+        success: false,
+        error: "QR offer not found or expired",
+      }), {
+        status: 404,
+        headers: {
+          "content-type": "application/json",
+          ...corsHeaders,
+        },
+      });
+    }
   }
 
   // WebSocket upgrade
