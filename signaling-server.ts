@@ -6,7 +6,7 @@
  * URL: wss://signal.clevrsend.app
  */
 
-const SERVER_VERSION = "1.5.2";
+const SERVER_VERSION = "1.5.4";
 
 interface ClientInfo {
   alias: string;
@@ -21,6 +21,7 @@ interface Client {
   socket: WebSocket;
   info: ClientInfo | null;
   lastPing: number;
+  ip: string;
 }
 
 // Store all connected clients
@@ -32,6 +33,113 @@ interface StoredOffer {
   timestamp: number;
 }
 const qrOffers = new Map<string, StoredOffer>();
+
+// ===== SECURITY: Rate Limiting =====
+interface RateLimitRecord {
+  count: number;
+  resetAt: number;
+}
+
+const rateLimits = new Map<string, RateLimitRecord>();
+const connectionLimits = new Map<string, number>();
+
+// Cleanup rate limit records every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, record] of rateLimits.entries()) {
+    if (now > record.resetAt) {
+      rateLimits.delete(ip);
+    }
+  }
+}, 5 * 60 * 1000);
+
+/**
+ * Check if IP is within rate limit
+ * @param ip Client IP address
+ * @param limit Max requests allowed
+ * @param windowMs Time window in milliseconds
+ * @returns true if within limit, false if exceeded
+ */
+function checkRateLimit(ip: string, limit: number, windowMs: number): boolean {
+  const now = Date.now();
+  const record = rateLimits.get(ip);
+
+  if (!record || now > record.resetAt) {
+    rateLimits.set(ip, { count: 1, resetAt: now + windowMs });
+    return true;
+  }
+
+  if (record.count >= limit) {
+    return false; // Rate limit exceeded
+  }
+
+  record.count++;
+  return true;
+}
+
+/**
+ * Check if IP has too many active connections
+ * @param ip Client IP address
+ * @param maxConnections Max allowed connections per IP
+ * @returns true if allowed, false if exceeded
+ */
+function checkConnectionLimit(ip: string, maxConnections: number): boolean {
+  const count = connectionLimits.get(ip) || 0;
+  return count < maxConnections;
+}
+
+/**
+ * Increment connection count for IP
+ */
+function incrementConnectionCount(ip: string): void {
+  const count = connectionLimits.get(ip) || 0;
+  connectionLimits.set(ip, count + 1);
+}
+
+/**
+ * Decrement connection count for IP
+ */
+function decrementConnectionCount(ip: string): void {
+  const count = connectionLimits.get(ip) || 0;
+  if (count > 0) {
+    connectionLimits.set(ip, count - 1);
+  }
+}
+
+// ===== SECURITY: CORS Whitelist =====
+const ALLOWED_ORIGINS = [
+  "https://clevrsend.com",
+  "https://www.clevrsend.com",
+  "https://clevrsend.vercel.app",
+  "http://localhost:3000", // Development only
+];
+
+/**
+ * Get CORS headers for allowed origins only
+ */
+function getCorsHeaders(origin: string | null): Record<string, string> {
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    return {
+      "access-control-allow-origin": origin,
+      "access-control-allow-methods": "GET, POST, OPTIONS",
+      "access-control-allow-headers": "Content-Type",
+    };
+  }
+  return {}; // No CORS headers for disallowed origins
+}
+
+/**
+ * Extract client IP from request
+ */
+function getClientIP(req: Request): string {
+  // Try various headers (Cloudflare, Render.com, etc.)
+  return (
+    req.headers.get("cf-connecting-ip") ||
+    req.headers.get("x-forwarded-for")?.split(",")[0].trim() ||
+    req.headers.get("x-real-ip") ||
+    "unknown"
+  );
+}
 
 // Generate short ID for QR codes (6 alphanumeric characters)
 function generateShortId(): string {
@@ -52,6 +160,10 @@ setInterval(() => {
   for (const [id, client] of clients.entries()) {
     if (now - client.lastPing > timeout) {
       console.log(`Removing inactive client: ${id}`);
+
+      // Decrement connection count for this IP
+      decrementConnectionCount(client.ip);
+
       client.socket.close();
       clients.delete(id);
       broadcast({
@@ -72,20 +184,27 @@ setInterval(() => {
 
 Deno.serve({ port: 8080 }, (req) => {
   const url = new URL(req.url);
-
-  // CORS headers for all requests
-  const corsHeaders = {
-    "access-control-allow-origin": "*",
-    "access-control-allow-methods": "GET, POST, OPTIONS",
-    "access-control-allow-headers": "Content-Type",
-  };
+  const clientIP = getClientIP(req);
+  const origin = req.headers.get("origin");
+  const corsHeaders = getCorsHeaders(origin);
 
   // Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHeaders });
   }
 
-  // Health check endpoint
+  // SECURITY: Check if origin is allowed (for non-preflight requests)
+  if (origin && !ALLOWED_ORIGINS.includes(origin)) {
+    console.warn(`Blocked request from unauthorized origin: ${origin} (IP: ${clientIP})`);
+    return new Response(JSON.stringify({
+      error: "Forbidden: Unauthorized origin",
+    }), {
+      status: 403,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  // Health check endpoint (public, no rate limit)
   if (url.pathname === "/health") {
     return new Response(JSON.stringify({
       status: "ok",
@@ -102,7 +221,22 @@ Deno.serve({ port: 8080 }, (req) => {
   }
 
   // Store QR offer endpoint: POST /qr/store
+  // SECURITY: Rate limit 10 requests per minute per IP
   if (url.pathname === "/qr/store" && req.method === "POST") {
+    if (!checkRateLimit(clientIP, 10, 60000)) {
+      console.warn(`Rate limit exceeded for /qr/store from IP: ${clientIP}`);
+      return new Response(JSON.stringify({
+        error: "Too many requests. Please try again later.",
+      }), {
+        status: 429,
+        headers: {
+          "content-type": "application/json",
+          "retry-after": "60",
+          ...corsHeaders,
+        },
+      });
+    }
+
     return req.json().then((data) => {
       // Generate unique short ID
       let shortId = generateShortId();
@@ -178,8 +312,41 @@ Deno.serve({ port: 8080 }, (req) => {
     return new Response("Expected WebSocket connection", { status: 426 });
   }
 
+  // SECURITY: Check total client limit (prevent memory exhaustion)
+  const MAX_TOTAL_CLIENTS = 1000;
+  if (clients.size >= MAX_TOTAL_CLIENTS) {
+    console.warn(`Server at capacity (${clients.size} clients). Rejecting new connection from IP: ${clientIP}`);
+    return new Response(JSON.stringify({
+      error: "Server at capacity. Please try again later.",
+    }), {
+      status: 503,
+      headers: {
+        "content-type": "application/json",
+        "retry-after": "60",
+      },
+    });
+  }
+
+  // SECURITY: Check connection limit per IP (prevent single IP flooding)
+  const MAX_CONNECTIONS_PER_IP = 5;
+  if (!checkConnectionLimit(clientIP, MAX_CONNECTIONS_PER_IP)) {
+    console.warn(`Connection limit exceeded for IP: ${clientIP} (max: ${MAX_CONNECTIONS_PER_IP})`);
+    return new Response(JSON.stringify({
+      error: `Too many connections from your IP. Maximum ${MAX_CONNECTIONS_PER_IP} connections allowed.`,
+    }), {
+      status: 429,
+      headers: {
+        "content-type": "application/json",
+        "retry-after": "120",
+      },
+    });
+  }
+
   const { socket, response } = Deno.upgradeWebSocket(req);
   const clientId = crypto.randomUUID();
+
+  // Track this connection
+  incrementConnectionCount(clientIP);
 
   // Parse initial client info from query parameter (Base64 encoded)
   const encodedInfo = url.searchParams.get("d");
@@ -201,6 +368,7 @@ Deno.serve({ port: 8080 }, (req) => {
       socket,
       info: initialInfo,
       lastPing: Date.now(),
+      ip: clientIP,
     };
 
     clients.set(clientId, client);
@@ -252,6 +420,10 @@ Deno.serve({ port: 8080 }, (req) => {
     const client = clients.get(clientId);
     if (client) {
       console.log(`Client ${clientId} disconnected. Total clients: ${clients.size - 1}`);
+
+      // Decrement connection count for this IP
+      decrementConnectionCount(client.ip);
+
       clients.delete(clientId);
 
       // Notify all other clients about the peer leaving
