@@ -6,7 +6,7 @@
  * URL: wss://signal.clevrsend.app
  */
 
-const SERVER_VERSION = "1.5.5";
+const SERVER_VERSION = "1.5.6";
 
 interface ClientInfo {
   alias: string;
@@ -110,6 +110,8 @@ function decrementConnectionCount(ip: string): void {
 const ALLOWED_ORIGINS = [
   "https://clevrsend.com",
   "https://www.clevrsend.com",
+  "https://clevrsend.app",
+  "https://www.clevrsend.app",
   "https://clevrsend.vercel.app",
   "http://localhost:3000", // Development only
 ];
